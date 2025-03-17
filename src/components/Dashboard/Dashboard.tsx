@@ -52,9 +52,23 @@ export default function Dashboard() {
     return () => clearInterval(intervalId);
   }, []);
 
-  const handleRefresh = () => {
+
+  const handleRefresh = async () => {
     setRefreshing(true);
-    fetchData();
+    try {
+      // Call the refresh endpoint to trigger the scrape
+      const refreshResponse = await fetch('/api/basketball-refresh');
+      if (!refreshResponse.ok) {
+        throw new Error(`Error ${refreshResponse.status}: ${refreshResponse.statusText}`);
+      }
+      
+      // After triggering the refresh, fetch the updated data
+      await fetchData();
+    } catch (err) {
+      console.error('Error refreshing data:', err);
+      setError('Failed to refresh registration data. Please try again.');
+      setRefreshing(false);
+    }
   };
 
   const formatDate = (dateString: string): string => {
