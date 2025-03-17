@@ -1,8 +1,7 @@
 import puppeteer from 'puppeteer';
 import sgMail from '@sendgrid/mail';
-import { promises as fs } from 'fs';
-import path from 'path';
 import dotenv from 'dotenv';
+import { put, list } from "@vercel/blob";
 
 // Load environment variables
 dotenv.config();
@@ -22,7 +21,7 @@ interface RegistrationData {
 }
 
 // Constants
-const DATA_FILE_PATH = path.join('public', 'data', 'basketball-registrations.json');
+const BLOB_FILENAME = 'basketball-registrations.json';
 const SCRAPE_INTERVAL_HOURS = 6;
 const URL = 'https://appsb.mardelplata.gob.ar/Consultas/nPolideportivos/Vistas/Inscripciones/InscripcionWeb/InscripcionWeb.aspx';
 
@@ -30,29 +29,32 @@ const URL = 'https://appsb.mardelplata.gob.ar/Consultas/nPolideportivos/Vistas/I
 sgMail.setApiKey(process.env.SENDGRID_API_KEY || '');
 
 class BasketballRegistrationScraper {
-    private async saveData(registrations: BasketballRegistration[]): Promise<void> {
+    private async saveData(registrations: BasketballRegistration[]): Promise<string> {
         try {
-            await fs.mkdir(path.dirname(DATA_FILE_PATH), { recursive: true });
-
             const data: RegistrationData = {
                 timestamp: new Date().toISOString(),
                 registrations
             };
 
-            await fs.writeFile(DATA_FILE_PATH, JSON.stringify(data, null, 2));
-            console.log('✓ Data saved successfully');
+            // Save data to Vercel Blob storage
+            const { url } = await put(BLOB_FILENAME, JSON.stringify(data, null, 2), {
+                access: 'public',
+                contentType: 'application/json'
+            });
+
+            console.log(`✓ Data saved successfully to ${url}`);
+            return url;
         } catch (error) {
             console.error('✗ Error saving data:', error);
             throw error;
         }
     }
 
-    private async sendEmail(registrations: BasketballRegistration[]): Promise<void> {
+    private async sendEmail(registrations: BasketballRegistration[], blobUrl?: string): Promise<void> {
         if (!process.env.RECIPIENT_EMAIL || !process.env.FROM_EMAIL) {
             console.error('✗ Missing email configuration');
             return;
         }
-
 
         let htmlContent: string;
 
@@ -113,6 +115,7 @@ class BasketballRegistrationScraper {
             <div style="border-top: 1px solid #eee; padding-top: 20px; color: #666; font-size: 14px;">
               <p style="margin: 5px 0;">📅 Actualizado automáticamente cada ${SCRAPE_INTERVAL_HOURS} horas</p>
               <p style="margin: 5px 0;">⚠️ Este es un mensaje automático, por favor no responder</p>
+              ${blobUrl ? `<p style="margin: 5px 0;">🔗 <a href="${blobUrl}">Ver datos en formato JSON</a></p>` : ''}
             </div>
           </div>
         </div>
@@ -224,8 +227,8 @@ class BasketballRegistrationScraper {
             console.table(registrations);
 
             // Step 7: Save data and send email
-            await this.saveData(registrations);
-            await this.sendEmail(registrations);
+            const blobUrl = await this.saveData(registrations);
+            await this.sendEmail(registrations, blobUrl);
 
         } catch (error) {
             console.error('\n=== ERROR ===');
@@ -233,8 +236,17 @@ class BasketballRegistrationScraper {
 
             // Take screenshot in case of error
             if (page) {
-                await page.screenshot({ path: 'error-screenshot.png' });
-                console.log('▸ Error screenshot saved as error-screenshot.png');
+                // Save screenshot to Vercel Blob
+                try {
+                    const screenshot = await page.screenshot();
+                    const { url } = await put('error-screenshot.png', Buffer.from(screenshot), { 
+                        access: 'public',
+                        contentType: 'image/png'
+                    });
+                    console.log(`▸ Error screenshot saved to ${url}`);
+                } catch (screenshotError) {
+                    console.error('✗ Error saving screenshot:', screenshotError);
+                }
 
                 await this.sendEmail([]);
             }
@@ -259,11 +271,24 @@ class BasketballRegistrationScraper {
 const scraper = new BasketballRegistrationScraper();
 scraper.start().catch(console.error);
 
-
 // GET method to retrieve the latest basketball registrations
 export async function GET() {
     try {
-        const data = await fs.readFile(DATA_FILE_PATH, 'utf-8');
+        // List blobs to find the most recent basketball registrations file
+        const { blobs } = await list();
+        const regBlob = blobs.find((blob: { pathname: string; }) => blob.pathname === BLOB_FILENAME);
+        
+        if (!regBlob) {
+            return new Response(JSON.stringify({ error: 'No data found' }), {
+                status: 404,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // Fetch the data from the URL
+        const response = await fetch(regBlob.url);
+        const data = await response.text();
+
         return new Response(data, {
             headers: {
                 'Content-Type': 'application/json',
